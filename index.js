@@ -1,0 +1,338 @@
+const makeWASocket = require('@whiskeysockets/baileys').default;
+const {
+    useMultiFileAuthState,
+    DisconnectReason,
+    fetchLatestBaileysVersion,
+    Browsers,
+    downloadContentFromMessage
+} = require('@whiskeysockets/baileys');
+
+const pino = require('pino');
+const qrcode = require('qrcode-terminal');
+const fs = require('fs');
+const path = require('path');
+
+const { handleAntiLink } = require('./commands/links');
+const { handleAntiSticker } = require('./commands/sticker');
+
+// ==========================================
+// 👑 BOT CONFIGURATION & OWNER SETTINGS
+// ==========================================
+const OWNER_NUMBER = '923404908660';
+const DEVELOPER_NAME = 'Sami Khan';
+const BOT_NAME = 'VIP MASTER BOT';
+
+// ==========================================
+// ⚙️ GLOBAL STATES & MEMORY (RAM)
+// ==========================================
+if (global.isBotActive === undefined) global.isBotActive = true;
+let isAutoReactActive = false;
+let isLinksProtectionActive = false; // Default OFF
+let isStickerProtectionActive = false; // Default OFF
+let reconnecting = false;
+
+const messageCache = new Map();
+const mutedUsers = new Set();
+if (!global.warningsTrack) global.warningsTrack = new Map();
+
+// ==========================================
+// 📂 DYNAMIC COMMAND LOADER
+// ==========================================
+const commands = new Map();
+const commandPath = path.join(__dirname, 'commands');
+
+if (fs.existsSync(commandPath)) {
+    const commandFiles = fs.readdirSync(commandPath).filter(file => file.endsWith('.js'));
+    for (const file of commandFiles) {
+        const filePath = path.join(commandPath, file);
+        const commandModule = require(filePath);
+        if (commandModule.name) {
+            commands.set(commandModule.name, commandModule);
+            console.log(`✅ Loaded Command: !${commandModule.name}`);
+        }
+    }
+}
+
+const CONFIG_FILE = path.resolve('./config.json');
+
+function getPrefix() {
+    try {
+        if (fs.existsSync(CONFIG_FILE)) {
+            const data = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+            return data.prefix || '!';
+        }
+    } catch { }
+    return '!';
+}
+
+// ==========================================
+// 🚀 MAIN BOT FUNCTION
+// ==========================================
+async function startBot() {
+    console.log('🔄 VIP Master Bot Initializing... Please wait!');
+
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+    console.log(`📡 WA Version: ${version.join('.')} (Latest: ${isLatest})`);
+
+    const { state, saveCreds } = await useMultiFileAuthState('bot_session');
+
+    const sock = makeWASocket({
+        version,
+        logger: pino({ level: 'silent' }),
+        printQRInTerminal: false,
+        auth: state,
+        browsers: Browsers.ubuntu('Chrome'),
+        markOnlineOnConnect: true,
+        connectTimeoutMs: 60000,
+        keepAliveIntervalMs: 15000
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    // ==========================================
+    // 🌐 CONNECTION MANAGER
+    // ==========================================
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+
+        if (qr) {
+            console.log('\n=============================================');
+            console.log('📱 NEW WHATSAPP QR CODE');
+            console.log('=============================================');
+            qrcode.generate(qr, { small: true });
+            console.log('=============================================');
+            console.log('📱 WhatsApp > Linked Devices > Link a device');
+            console.log('=============================================\n');
+        }
+
+        if (connection === 'close') {
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            console.log('🔌 WhatsApp connection closed. Status Code:', statusCode);
+
+            if (statusCode === DisconnectReason.loggedOut) {
+                console.log('🚪 WhatsApp unlink detect ho gaya! Cleaning session...');
+                try {
+                    if (fs.existsSync('bot_session')) {
+                        fs.rmSync('bot_session', { recursive: true, force: true });
+                        console.log('✅ Old bot_session deleted.');
+                    }
+                } catch (deleteError) {
+                    console.error('❌ Session delete error:', deleteError.message);
+                }
+                setTimeout(() => startBot(), 3000);
+                return;
+            }
+
+            if (reconnecting) return;
+            reconnecting = true;
+            setTimeout(() => {
+                reconnecting = false;
+                startBot();
+            }, 10000);
+            return;
+        }
+
+        if (connection === 'open') {
+            reconnecting = false;
+            console.log('\n=============================================');
+            console.log('✅ SUCCESS: WhatsApp Bot is ONLINE!');
+            console.log('=============================================\n');
+        }
+    });
+
+    async function safeSendMessage(jid, content, options = {}) {
+        try {
+            return await sock.sendMessage(jid, content, options);
+        } catch (err) {
+            console.error('❌ SEND MESSAGE FAILED:', jid, err?.message);
+            return null;
+        }
+    }
+
+    // ==========================================
+    // 📩 MESSAGE HANDLER (Rules Engine)
+    // ==========================================
+    sock.ev.on('messages.upsert', async (m) => {
+        try {
+
+            const msg = m.messages[0];
+            if (!msg || !msg.message) return;
+
+            await handleAntiLink(sock, msg);
+            await handleAntiSticker(sock, msg);
+
+            const text = (msg.message.conversation ||
+                msg.message.extendedTextMessage?.text ||
+                msg.message.imageMessage?.caption ||
+                msg.message.videoMessage?.caption || '').trim();
+
+            const rawSender = msg.key.fromMe ? (OWNER_NUMBER + '@s.whatsapp.net') : (msg.key.participant || msg.key.remoteJid);
+            const isOwner = msg.key.fromMe || rawSender.includes(OWNER_NUMBER);
+
+            // AGAR BOT STOP HAI, TOH SIRF '!bot start' ALLOW HOGA, BAKI SAB KUCH OFF RAHEGA
+            if (global.isBotActive === false) {
+                const currentPrefix = getPrefix();
+                if (isOwner && text.toLowerCase().startsWith(currentPrefix.toLowerCase() + 'bot start')) {
+                    // Allow processing only for turning bot back on
+                } else {
+                    return;
+                }
+            }
+
+            // 1. 📝 ANTI-DELETE CACHING (Must be at the very top for proper tracking)
+            if (msg.key.id) {
+                messageCache.set(msg.key.id, msg);
+                setTimeout(() => messageCache.delete(msg.key.id), 2 * 60 * 60 * 1000);
+            }
+
+            const isGroup = msg.key.remoteJid.endsWith('@g.us');
+            const messageType = Object.keys(msg.message)[0];
+
+            // 🎭 FOOLPROOF STICKER DETECTION (Sabhi tarah ke stickers catch honge)
+            const isSticker = messageType === 'stickerMessage' ||
+                !!msg.message.stickerMessage ||
+                !!msg.message.ephemeralMessage?.message?.stickerMessage ||
+                !!msg.message.viewOnceMessage?.message?.stickerMessage ||
+                !!msg.message.documentWithCaptionMessage?.message?.stickerMessage;
+
+            const senderClean = rawSender.replace(/:[0-9]+/, '');
+
+            // ==========================================
+            // 👁️ VIEW ONCE HOOK
+            // ==========================================
+            const onceModule = commands.get('once') || commands.get('onceview');
+            if (onceModule && typeof onceModule.execute === 'function') {
+                const context = { OWNER_NUMBER, safeSendMessage, isOwner, DEVELOPER_NAME };
+                await onceModule.execute(sock, msg, [], context);
+            }
+
+            // ==========================================
+            // 🛡️ GROUP SECURITY & ADMIN EXEMPTION
+            // ==========================================
+            if (isGroup && !msg.key.fromMe) {
+                const senderVariants = [senderClean, msg.key.participant, msg.key.participantPn].filter(Boolean).map(jid => jid.replace(/:[0-9]+/, ''));
+                const isMutedUser = senderVariants.some(jid => mutedUsers.has(jid));
+
+                if (isMutedUser) {
+                    await safeSendMessage(msg.key.remoteJid, { delete: msg.key });
+                    return;
+                }
+
+                const groupMetadata = await sock.groupMetadata(msg.key.remoteJid).catch(() => null);
+                const participants = groupMetadata?.participants || [];
+                const senderParticipant = participants.find(p => p.id === rawSender || p.id === senderClean || p.id === msg.key.participant);
+                const isAdmin = senderParticipant?.admin === 'admin' || senderParticipant?.admin === 'superadmin';
+
+                if (isAutoReactActive && !msg.key.fromMe) {
+                    const emojis = ['👍', '❤️', '🔥', '😂', '💯', '✨', '👀'];
+                    const randomEmoji = emojis[Math.floor(Math.random() * emojis.length)];
+                    await safeSendMessage(msg.key.remoteJid, { react: { text: randomEmoji, key: msg.key } });
+                }
+            }
+
+            // ===========================================================
+            // 🤖 COMMAND PROCESSOR (With Prefix Warning)+ Prefix Support
+            // ===========================================================
+            const currentPrefix = getPrefix();
+            const trimmedText = text.trim();
+            const firstChar = trimmedText[0];
+
+            // ⚠️ Check wrong prefix attempt
+            if (!text.startsWith(currentPrefix)) {
+                const configRaw = fs.existsSync(CONFIG_FILE) ? JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')) : {};
+                const prevPrefix = configRaw.oldPrefix;
+                const isOldPrefixUsed = prevPrefix && trimmedText.startsWith(prevPrefix);
+                const isWrongSymbolAttempt = ['!', '.', '/', '#', ','].includes(firstChar) && trimmedText.length > 1;
+
+                if (isOldPrefixUsed || isWrongSymbolAttempt) {
+                    await safeSendMessage(
+                        msg.key.remoteJid,
+                        {
+                            text:
+                                `════════════════════════════════\n` +
+                                ` 👑 *${BOT_NAME}* 👑         \n` +
+                                ` 🤖 *Prefix Warning*        \n` +
+                                `════════════════════════════════\n\n\n` +
+                                `⚠️ Aap galat prefix use kar rahe hain, Aapka active prefix \`${currentPrefix}\` hai, aap ye wala \`${currentPrefix}\` istemal karein.\n\n\n` +
+                                `════════════════════════════════\n` +
+                                ` ⚡ *Status:* Alert\n` +
+                                ` 👨‍💻 *Developer:* ${DEVELOPER_NAME}\n` +
+                                `════════════════════════════════`
+                        },
+                        { quoted: msg }
+                    );
+                    return;
+                }
+            }
+
+            if (text.startsWith(currentPrefix)) {
+                const args = text.slice(currentPrefix.length).trim().split(/ +/);
+                const commandName = args.shift().toLowerCase();
+
+                const command = commands.get(commandName);
+                if (command) {
+                    try {
+                        const context = {
+                            OWNER_NUMBER,
+                            isOwner,
+                            isGroup,
+                            safeSendMessage,
+                            mutedUsers,
+                            warningsTrack: global.warningsTrack,
+                            isBotActive: global.isBotActive,
+                            isAutoReactActive,
+                            isLinksProtectionActive,
+                            isStickerProtectionActive,
+                            setBotActive: (val) => { global.isBotActive = val; },
+                            setAutoReactActive: (val) => { isAutoReactActive = val; },
+                            setLinksProtection: (val) => { isLinksProtectionActive = val; },
+                            setStickerProtection: (val) => { isStickerProtectionActive = val; }
+                        };
+                        await command.execute(sock, msg, args, context);
+                    } catch (cmdError) {
+                        console.error(`❌ Error executing command ${commandName}:`, cmdError?.message || cmdError);
+                        await safeSendMessage(msg.key.remoteJid, { text: '⚠️ Command execute karne mein error aa gaya!' }, { quoted: msg });
+                    }
+                }
+            }
+        } catch (err) {
+            console.error('Core Logic Error:', err?.message || err);
+        }
+    });
+
+    // ==========================================
+    // 🚨 ANTI-DELETE HANDLER (Fully Patched)
+    // ==========================================
+    const processedDeletes = new Set();
+    async function handleDeletedMessage(updateObject) {
+        try {
+            // Agar bot stop hai toh anti-delete bhi run nahi hoga
+            if (global.isBotActive === false) return;
+
+            const antideleteModule = commands.get('antidelete');
+            if (antideleteModule && typeof antideleteModule.handleEvent === 'function') {
+                await antideleteModule.handleEvent(sock, updateObject, messageCache, OWNER_NUMBER, safeSendMessage);
+            }
+        } catch (e) {
+            console.error('❌ Anti-delete trigger error:', e?.message || e);
+        }
+    }
+
+    sock.ev.on('messages.update', async (updates) => {
+        for (const update of updates || []) {
+            await handleDeletedMessage(update);
+        }
+    });
+
+    sock.ev.on('messages.upsert', async (upsert) => {
+        for (const message of upsert.messages || []) {
+            if (message?.message?.protocolMessage) {
+                await handleDeletedMessage(message);
+            }
+        }
+    });
+}
+process.on('unhandledRejection', (reason) => { });
+process.on('uncaughtException', (error) => { });
+
+startBot();

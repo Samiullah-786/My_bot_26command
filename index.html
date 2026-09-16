@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VIP Master Pairing Network</title>
+    <style>
+        body {
+            background: #0f111a;
+            color: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+
+        .card {
+            background: #181b28;
+            padding: 30px;
+            border-radius: 14px;
+            width: 360px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+            border: 1px solid #2e344e;
+        }
+
+        h2 {
+            text-align: center;
+            margin-bottom: 20px;
+            font-size: 20px;
+            color: #f4b85c;
+        }
+
+        label {
+            font-size: 13px;
+            color: #a0aec0;
+            display: block;
+            margin-top: 10px;
+        }
+
+        select,
+        input,
+        button {
+            width: 100%;
+            padding: 12px;
+            margin-top: 6px;
+            border-radius: 8px;
+            border: 1px solid #2e344e;
+            background: #0f111a;
+            color: #fff;
+            box-sizing: border-box;
+            font-size: 14px;
+        }
+
+        button {
+            background: #e09f3e;
+            color: #000;
+            font-weight: bold;
+            cursor: pointer;
+            border: none;
+            margin-top: 20px;
+            transition: 0.2s;
+        }
+
+        button:hover {
+            background: #f4b85c;
+        }
+
+        #result {
+            margin-top: 20px;
+            font-size: 15px;
+            text-align: center;
+            color: #25d366;
+            background: rgba(37, 211, 102, 0.1);
+            padding: 10px;
+            border-radius: 8px;
+            display: none;
+        }
+
+        .footer {
+            font-size: 11px;
+            color: #718096;
+            text-align: center;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="card">
+        <h2>VIP Master Bot</h2>
+        <label>Choose a server</label>
+        <select id="server">
+            <option value="server1">server1</option>
+            <option value="server2">server2</option>
+        </select>
+        <label>Enter your number</label>
+        <input type="text" id="phone" placeholder="e.g. 923001234567" />
+        <button onclick="getCode()">Get Code</button>
+        <div id="result"></div>
+        <div class="footer">100% Encrypted Session Isolation</div>
+    </div>
+    <script>
+        async function getCode() {
+            const server = document.getElementById('server').value;
+            const phone = document.getElementById('phone').value;
+            const resDiv = document.getElementById('result');
+            resDiv.style.display = 'block';
+            resDiv.style.color = '#f4b85c';
+            resDiv.innerText = 'Requesting code from server...';
+
+            try {
+                const response = await fetch('/api/pair', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ server, phone })
+                });
+                const data = await response.json();
+                if (data.code) {
+                    resDiv.style.color = '#25d366';
+                    resDiv.innerHTML = `Your Code: <strong style="color:#fff; font-size:18px; letter-spacing:1px;">${data.code}</strong>`;
+                } else {
+                    resDiv.style.color = '#e53e3e';
+                    resDiv.innerText = data.error || data.msg || 'Failed';
+                }
+            } catch (e) {
+                resDiv.style.color = '#e53e3e';
+                resDiv.innerText = 'Backend connection failed!';
+            }
+        }
+    </script>
+</body>
+
+</html>
